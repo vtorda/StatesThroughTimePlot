@@ -1,0 +1,193 @@
+---
+title: "states_through_time_5000"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(ape)
+library(phytools)
+library(tidyverse)
+library(stringr)
+```
+Import files
+
+```{r}
+data_path <- "./data/"
+simmap_files <- list.files(data_path, pattern = "^simmap")
+simmap_files_names <- str_replace(simmap_files, "\\.RData", "")
+```
+
+Summarizing the results of simmap. Save it because it takes some time to calculate.
+Especially in case of high number of simulations. 
+
+```{r}
+for(i in 1:length(simmap_files)){
+  cat(i, "\n")
+  env <- new.env()
+  nm <- load(paste(data_path, simmap_files[i], sep = ""), env)[1]
+  simmap <- env[[nm]]
+  XX <- describe.simmap(simmap, plot = FALSE)
+  save(XX, file = paste(data_path, simmap_files_names[i], ".describe.RData", sep = ""))
+  rm(list = c("simmap", "XX"))
+}
+
+```
+
+#branching times
+
+Creating a list with the branching times of the tree
+
+```{r}
+node_ages <- list()
+for(i in 1:length(simmap_files)){
+  cat(i, "\n")
+  env <- new.env()
+  nm <- load(paste(data_path, simmap_files[i], sep = ""), env)[1]
+  simmap <- env[[nm]]
+  node_ages[[i]] <- branching.times(simmap[[1]])
+  rm(list = c("simmap"))
+}
+names(node_ages) <- simmap_files_names
+```
+
+
+Extract the "ace" object from the summarised simmap files
+
+```{r}
+describe_files <- list.files(data_path, pattern = "describe.RData")
+ace_list <- list()
+for(i in 1:length(describe_files)){
+  cat(i, "\n")
+  env <- new.env()
+  nm <- load(paste(data_path, describe_files[i], sep = ""), env)[1]
+  describe <- env[[nm]]
+  ace_list[[i]] <- describe$ace
+  rm(list = c("describe"))
+}
+names(ace_list) <- describe_files
+```
+
+```{r}
+# Are the two list is in the same order?
+names(ace_list)
+names(node_ages)
+# Yes, so go ahead and create a data.frame from the lists
+ace_list <- lapply(ace_list, data.frame)
+for(i in 1:length(ace_list)){
+  ace_list[[i]]$nodes <- rownames(ace_list[[i]])
+}
+for(i in 1:length(ace_list)){
+  ace_list[[i]]$node_ages <- node_ages[[i]][match(ace_list[[i]]$nodes, names(node_ages[[i]]))]
+}
+ace_all <- bind_rows(ace_list)
+```
+
+The present character state is needed as well
+
+```{r}
+tree_files <- list.files(data_path, pattern = "kronogram")
+trees <- lapply(tree_files, function(x) read.tree(paste(data_path, x, sep = "")))
+fb_types_df <- read_delim(paste0(data_path, "FB_types_corrected_df.txt"), delim = "\t", col_names = TRUE)
+#checking the species names, some correction is needed in the example files...
+mis_names_trees <- which(trees[[1]]$tip.label %in% fb_types_df$Species == FALSE)
+mis_names_trait <- which(fb_types_df$Species %in% trees[[1]]$tip.label == FALSE)
+trees[[1]]$tip.label[mis_names_trees]
+fb_types_df$Species[mis_names_trait]
+# The misspelled names are the same order so easy to change it
+fb_types_df[mis_names_trait, "Species"] <- trees[[1]]$tip.label[mis_names_trees]
+# Some modifications on character states' name are needed as well
+fb_types_df2 <- fb_types_df
+fb_types_df2[is.na(fb_types_df2$corrected), "corrected"] <- "Resupinate"
+fb_types_df2[fb_types_df2$corrected %in% c("Pileate-stipitate", "Pileate-sessile"), "corrected"] <- "Cap_Fungi"
+fb_types_df2[fb_types_df2$corrected %in% c("Clavaroid", "Coralloid"), "corrected"] <- "Coral_Clavar"
+unique(fb_types_df2$corrected)
+# Now the names are ok, lets modify the dataframe a bit more
+fb_types_df2$nodes <- as.character(1:nrow(fb_types_df2))
+fb_types_df2$node_ages <- rep(0, nrow(fb_types_df2))
+fb_types_df2$prob <- rep(1, nrow(fb_types_df2))
+fb_types_df3 <- fb_types_df2[,-c(1:4)]
+fb_types_df4 <- spread(data = fb_types_df3, key = corrected, value = prob)
+fb_types_df4[,3:ncol(fb_types_df4)][is.na(fb_types_df4[,3:ncol(fb_types_df4)])] <- 0
+#colnames(fb_types_df4) <- c("nodes", "node_ages", "Clavaroid", "Coralloid", "Cyphelloid", "Gasteroid", "no_fb", "Pileate.sessile", "Pileate.stipitate", "Resupinate")
+
+```
+
+So the important thing up is that have a dataframe like fb_types_df4!
+
+Next the dataframe have to be multiplied as many times as many trees you analyzed
+
+```{r}
+fb_types_df5 <- fb_types_df4
+i  <- 1
+while(i != length(trees)){
+  fb_types_df5 <- bind_rows(fb_types_df5, fb_types_df4)
+  i <- i + 1
+}
+#The following should give the number of trees you analyzed:
+nrow(fb_types_df5) / length(trees[[1]]$tip.label)
+```
+
+Lets combine the ASR and the present states data, then cut to 100 sections of the timeline.
+
+```{r}
+ace_all2 <- bind_rows(ace_all, fb_types_df5)
+min_ages <- min(ace_all2$node_ages)
+max_ages <- max(ace_all2$node_ages) + 1
+section_size <- (max_ages - min_ages) / 100
+sections <- seq(from = min_ages, to = max_ages, by = section_size)
+names(sections) <- as.character(1:101)
+```
+
+
+Asign a section (out of 100) to each of the ages.
+
+```{r}
+ace_all2$section <- rep(NA, nrow(ace_all2))
+for(i in 1:nrow(ace_all2)){
+  for(j in 1:100){
+      if(ace_all2[i, "node_ages"] >= sections[j] & ace_all2[i, "node_ages"] < sections[j+1]){
+      ace_all2[i, "section"] <- names(sections)[j]
+    }  
+  }
+  if(i %% 1000==0) {
+      # Print on the screen some message
+      cat(paste0("iteration: ", i, "\n"))
+   }
+}
+```
+
+
+
+```{r}
+ace4 <- group_by(ace_all2, section) %>% 
+  summarise_if(is.numeric, funs(sum, n()))
+ace5 <- ace4[,2:8] / ace4[,9:15]
+ace5$sections <- ace4$section
+ace6 <- gather(ace5, key = "states", value = "prob_ratio", 1:6)
+ace6 <- ace6[2:ncol(ace6)]
+ace6$sections <- as.numeric(ace6$sections)
+```
+
+```{r}
+save(ace6, sections,  file = "state_through_time_finalfigure.RData")
+```
+
+
+```{r}
+states <- unique(ace6$states)
+states <- states[c(5,1,2:4,6)] # you can change the order of the data so the 
+ace6$states2 <- factor(ace6$states, levels = states)
+ggplot(ace6, aes(x = sections,y = prob_ratio)) + 
+  geom_area(aes(fill=states2, group = states2, colour = colors), position='stack', linetype = "solid", 
+            size = 1, colour = "black", alpha = 0.6) +
+  scale_x_reverse(labels = c("0", as.character(round(sections[c(0, 25, 50, 75, 101)],digits = 0))), breaks = c(0, 25, 50, 75, 100)) +
+  scale_fill_manual(values = c("#0000EE", "#CD2626", "#00B2EE", "#228B22", "#FFFF00", "#FFB90F"))+
+  theme_classic()
+```
+
+
